@@ -107,7 +107,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                     redirect_url = f'{self.cm_config.base_url}/comic/add?source_document_id={hitomi_id}&source_id=1'
                     await event.reply(f'存在需手动录入的tag, 请前往网页进行添加\n{redirect_url}')
                 else:
-                    resp = await client.post('/comic/add', json={'source_document_id': hitomi_id,
+                    resp = await client.post('/comic/add', json={'source_document_id': str(hitomi_id),
                                                                  'source_id': 1, 'inexistent_tags': {}})
                     redirect_url = f'{self.cm_config.base_url}/show_status'
                     await event.reply(f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}')
