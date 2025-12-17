@@ -11,9 +11,10 @@ import re
 PLUGIN_NAME = 'UnnamedCmIntegrate'
 
 logger = get_log(PLUGIN_NAME)
+GROUP_FILTER_NAME = '__unnamed_cm_group_filter__'
 
 
-@filter_registry.register('group_filter')
+@filter_registry.register(GROUP_FILTER_NAME)
 def filter_group_by_config(event: BaseMessageEvent) -> bool:
     if not event.is_group_event():
         return False
@@ -76,7 +77,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         await super().on_load()
 
     @admin_filter
-    @filter_registry.filters('group_filter')
+    @filter_registry.filters(GROUP_FILTER_NAME)
     @command_registry.command('cm')
     async def log_comic(self, event: GroupMessageEvent, hitomi_input: str):
         if not self.init:
