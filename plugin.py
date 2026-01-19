@@ -61,7 +61,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         logger.info(f'测试色孽神选后端连通性')
         link_ok = False
         async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                     cookies={'password': self.cm_config.auth_token}) as client:
+                                     cookies={'auth_token': self.cm_config.auth_token}) as client:
             try:
                 resp = await client.get('/api/site/download_status')
                 if resp.status_code == 200:
