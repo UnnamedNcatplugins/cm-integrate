@@ -92,7 +92,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
             return
         try:
             async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                         cookies={'password': self.cm_config.auth_token}) as client:
+                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
                 resp = await client.get(f'/api/documents/hitomi/get/{hitomi_id}')
                 if resp.status_code == 200:
                     comic_info: dict = resp.json()
