@@ -63,7 +63,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         async with httpx.AsyncClient(base_url=self.cm_config.base_url,
                                      cookies={'password': self.cm_config.auth_token}) as client:
             try:
-                resp = await client.get('/download_status')
+                resp = await client.get('/api/site/download_status')
                 if resp.status_code == 200:
                     link_ok = True
                 else:
@@ -93,23 +93,23 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         try:
             async with httpx.AsyncClient(base_url=self.cm_config.base_url,
                                          cookies={'password': self.cm_config.auth_token}) as client:
-                resp = await client.get(f'/get_document/{hitomi_id}')
-                if resp.status_code == 307:
-                    location = resp.headers.get('Location')
-                    await event.reply(f'本子已存在, 访问以下网址\n{self.cm_config.base_url}{location}')
+                resp = await client.get(f'/api/documents/hitomi/get/{hitomi_id}')
+                if resp.status_code == 200:
+                    comic_info: dict = resp.json()
+                    document_id = comic_info['document_info']['document_id']
+                    await event.reply(
+                        f'本子已存在, 访问以下网址\n{self.cm_config.base_url}/show_document/{document_id}')
                     return
                 if resp.status_code != 404:
                     resp.raise_for_status()
-                if resp.status_code < 300:
-                    return
-                resp = await client.get(f'/comic/get_missing_tags?source_document_id={hitomi_id}&source_id=1')
+                resp = await client.get(f'/api/tags/hitomi/missing_tags?source_document_id={hitomi_id}')
                 missing_tags = resp.json()
                 if missing_tags:
-                    redirect_url = f'{self.cm_config.base_url}/comic/add?source_document_id={hitomi_id}&source_id=1'
+                    redirect_url = f'/hitomi/add?source_document_id={hitomi_id}'
                     await event.reply(f'存在需手动录入的tag, 请前往网页进行添加\n{redirect_url}')
                 else:
-                    resp = await client.post('/comic/add', json={'source_document_id': str(hitomi_id),
-                                                                 'source_id': 1, 'inexistent_tags': {}})
+                    resp = await client.post('/api/documents/hitomi/add', json={'source_document_id': str(hitomi_id),
+                                                                                'inexistent_tags': {}})
                     redirect_url = f'{self.cm_config.base_url}/show_status'
                     await event.reply(f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}')
         except HTTPStatusError as cm_e:
@@ -121,5 +121,6 @@ class UnnamedCmIntegrate(NcatBotPlugin):
 
     async def on_close(self) -> None:
         await super().on_close()
+
 
 global_plugin_instance: Optional[UnnamedCmIntegrate] = None
