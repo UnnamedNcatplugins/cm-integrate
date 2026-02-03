@@ -96,7 +96,8 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                     return
                 comic_infos: list[dict] = resp.json()
                 for comic_info in comic_infos:
-                    await self.api.send_group_text(event.group_id, f'SGF5YXNlWXV1a2E=\n{comic_info["id"]}')
+                    await self.api.send_group_text(event.group_id, f'SGF5YXNlWXV1a2E=\n{comic_info["id"]}\n{comic_info["title"]}')
+            return
         try:
             async with httpx.AsyncClient(base_url=self.cm_config.base_url,
                                          cookies={'auth_token': self.cm_config.auth_token}) as client:
