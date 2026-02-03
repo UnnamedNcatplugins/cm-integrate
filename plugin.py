@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from .config_proxy import ProxiedPluginConfig
 from ncatbot.utils import get_log
 from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
-from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText
+from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText, At
 import httpx
 from typing import Optional
 import re
@@ -85,6 +85,8 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         if len(event.message) != 3:
             logger.debug(f'at消息长度不为3, 已取消')
             return
+        origin_text = None
+        cmd_trigger = False
         for message_segment in event.message:
             if message_segment.msg_seg_type == 'reply':
                 assert isinstance(message_segment, Reply)
@@ -103,16 +105,27 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 if not origin_text.startswith('26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e'):
                     logger.debug(f'开头魔数不匹配, 退出')
                     return
-                search_result = origin_text.splitlines()
-                hitomi_id = int(search_result[1])
-                try:
-                    await event.reply(await self.add_comic(hitomi_id))
-                except HTTPStatusError as cm_e:
-                    logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
-                    await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
-                except Exception as cm_e:
-                    logger.exception(f'请求过程发生异常', exc_info=cm_e)
-                    await event.reply(f'请求过程发生异常: {str(cm_e)}')
+            if message_segment.msg_seg_type == 'text':
+                assert isinstance(message_segment, Text) or isinstance(message_segment, PlainText)
+                if message_segment.text.replace(' ', '') == 's':
+                    cmd_trigger = True
+
+        if not cmd_trigger:
+            logger.debug(f'没有触发命令')
+            return
+        if not origin_text:
+            logger.debug(f'没有提取文本')
+            return
+        search_result = origin_text.splitlines()
+        hitomi_id = int(search_result[1])
+        try:
+            await event.reply(await self.add_comic(hitomi_id))
+        except HTTPStatusError as cm_e:
+            logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
+            await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
+        except Exception as cm_e:
+            logger.exception(f'请求过程发生异常', exc_info=cm_e)
+            await event.reply(f'请求过程发生异常: {str(cm_e)}')
 
     async def add_comic(self, hitomi_id: int):
         async with httpx.AsyncClient(base_url=self.cm_config.base_url,
