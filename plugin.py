@@ -88,8 +88,15 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         except ValueError:
             hitomi_id = extract_hitomi_id(hitomi_input)
         if not hitomi_id:
-            await event.reply(f'不是hitomi id也不是url, 你发了一坨')
-            return
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
+                resp = await client.get(f'/api/documents/hitomi/search?search_str={hitomi_input}')
+                if resp.status_code != 200:
+                    await event.reply(f'请求失败, 错误码: {resp.status_code}')
+                    return
+                comic_infos: list[dict] = resp.json()
+                for comic_info in comic_infos:
+                    await self.api.send_group_text(event.group_id, f'SGF5YXNlWXV1a2E=\n{comic_info["id"]}')
         try:
             async with httpx.AsyncClient(base_url=self.cm_config.base_url,
                                          cookies={'auth_token': self.cm_config.auth_token}) as client:
