@@ -1,9 +1,10 @@
 from httpx import HTTPStatusError
-from ncatbot.plugin_system import NcatBotPlugin, command_registry, filter_registry, admin_filter
+from ncatbot.plugin_system import NcatBotPlugin, command_registry, filter_registry, admin_filter, on_group_at
 from dataclasses import dataclass, field
 from .config_proxy import ProxiedPluginConfig
 from ncatbot.utils import get_log
 from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
+from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText
 import httpx
 from typing import Optional
 import re
@@ -78,6 +79,63 @@ class UnnamedCmIntegrate(NcatBotPlugin):
 
     @admin_filter
     @filter_registry.filters(GROUP_FILTER_NAME)
+    @on_group_at
+    async def at_func(self, event: GroupMessageEvent):
+        logger.debug('收到at消息, 开始验证')
+        if len(event.message) != 3:
+            logger.debug(f'at消息长度不为3, 已取消')
+            return
+        for message_segment in event.message:
+            if message_segment.msg_seg_type == 'reply':
+                assert isinstance(message_segment, Reply)
+                reply_ptr = message_segment.id
+                origin_msg = await self.api.get_msg(reply_ptr)
+                if len(origin_msg.message) > 1:
+                    logger.debug(f'引用消息长度超1, 退出')
+                    return
+                origin_text_msg = origin_msg.message.messages[0]
+                if origin_text_msg.msg_seg_type != 'text':
+                    logger.debug(f'引用消息类型非纯文字')
+                    return
+                assert isinstance(origin_text_msg, Text) or isinstance(origin_text_msg, PlainText)
+                origin_text = origin_text_msg.text
+                # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearchResult 取sha256
+                if not origin_text.startswith('26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e'):
+                    logger.debug(f'开头魔数不匹配, 退出')
+                    return
+                search_result = origin_text.splitlines()
+                hitomi_id = int(search_result[1])
+                try:
+                    await event.reply(await self.add_comic(hitomi_id))
+                except HTTPStatusError as cm_e:
+                    logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
+                    await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
+                except Exception as cm_e:
+                    logger.exception(f'请求过程发生异常', exc_info=cm_e)
+                    await event.reply(f'请求过程发生异常: {str(cm_e)}')
+
+    async def add_comic(self, hitomi_id: int):
+        async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                     cookies={'auth_token': self.cm_config.auth_token}) as client:
+            resp = await client.get(f'/api/documents/hitomi/get/{hitomi_id}')
+            if resp.status_code == 200:
+                comic_info: dict = resp.json()
+                document_id = comic_info['document_info']['document_id']
+                return f'本子已存在, 访问以下网址\n{self.cm_config.base_url}/show_document/{document_id}'
+            if resp.status_code != 404:
+                resp.raise_for_status()
+            resp = await client.get(f'/api/tags/hitomi/missing_tags?source_document_id={hitomi_id}')
+            missing_tags = resp.json()
+            if missing_tags:
+                redirect_url = f'/hitomi/add?source_document_id={hitomi_id}'
+                return f'存在需手动录入的tag, 请前往网页进行添加\n{redirect_url}'
+            resp = await client.post('/api/documents/hitomi/add', json={'source_document_id': str(hitomi_id),
+                                                                        'inexistent_tags': {}})
+            redirect_url = f'{self.cm_config.base_url}/show_status'
+            return f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}'
+
+    @admin_filter
+    @filter_registry.filters(GROUP_FILTER_NAME)
     @command_registry.command('cm')
     async def log_comic(self, event: GroupMessageEvent, hitomi_input: str):
         if not self.init:
@@ -96,35 +154,16 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                     return
                 comic_infos: list[dict] = resp.json()
                 for comic_info in comic_infos:
-                    await self.api.send_group_text(event.group_id, f'SGF5YXNlWXV1a2E=\n{comic_info["id"]}\n{comic_info["title"]}')
+                    # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
+                    await self.api.send_group_text(event.group_id, f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
             return
         try:
-            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
-                resp = await client.get(f'/api/documents/hitomi/get/{hitomi_id}')
-                if resp.status_code == 200:
-                    comic_info: dict = resp.json()
-                    document_id = comic_info['document_info']['document_id']
-                    await event.reply(
-                        f'本子已存在, 访问以下网址\n{self.cm_config.base_url}/show_document/{document_id}')
-                    return
-                if resp.status_code != 404:
-                    resp.raise_for_status()
-                resp = await client.get(f'/api/tags/hitomi/missing_tags?source_document_id={hitomi_id}')
-                missing_tags = resp.json()
-                if missing_tags:
-                    redirect_url = f'/hitomi/add?source_document_id={hitomi_id}'
-                    await event.reply(f'存在需手动录入的tag, 请前往网页进行添加\n{redirect_url}')
-                else:
-                    resp = await client.post('/api/documents/hitomi/add', json={'source_document_id': str(hitomi_id),
-                                                                                'inexistent_tags': {}})
-                    redirect_url = f'{self.cm_config.base_url}/show_status'
-                    await event.reply(f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}')
+            await event.reply(await self.add_comic(hitomi_id))
         except HTTPStatusError as cm_e:
-            logger.error(f'请求{resp.url}过程发生HTTP异常: {str(cm_e)}')
-            await event.reply(f'请求{resp.url}过程发生HTTP异常: {str(cm_e)}')
-        except RuntimeError as cm_e:
-            logger.error(f'请求过程发生异常: {str(cm_e)}')
+            logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
+            await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
+        except Exception as cm_e:
+            logger.exception(f'请求过程发生异常', exc_info=cm_e)
             await event.reply(f'请求过程发生异常: {str(cm_e)}')
 
     async def on_close(self) -> None:
