@@ -164,11 +164,19 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 resp = await client.get(f'/api/documents/hitomi/search?search_str={hitomi_input}')
                 if resp.status_code != 200:
                     await event.reply(f'请求失败, 错误码: {resp.status_code}')
+                    try:
+                        err_json = resp.json()
+                        err_detail = err_json.get('detail', None)
+                        if err_detail:
+                            await event.reply(f'错误详情: {err_detail}')
+                    except Exception as e:
+                        logger.debug(e, exc_info=True)
                     return
                 comic_infos: list[dict] = resp.json()
                 for comic_info in comic_infos:
                     # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
                     await self.api.send_group_text(event.group_id, f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
+                await event.reply(event.group_id, '搜索结果结束')
             return
         try:
             await event.reply(await self.add_comic(hitomi_id))
