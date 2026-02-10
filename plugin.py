@@ -172,23 +172,16 @@ class UnnamedCmIntegrate(NcatBotPlugin):
             hitomi_id = int(hitomi_input)
         except ValueError:
             hitomi_id = extract_hitomi_id(hitomi_input)
-        if not hitomi_id:
-            try:
-                comic_infos = await self.search_comic(hitomi_input)
-                for comic_info in comic_infos:
-                    # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                    await self.api.send_group_text(event.group_id,
-                                                   f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
-                await event.reply(event.group_id, '搜索结果结束')
-            except HTTPStatusError as cm_e:
-                logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
-                await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
-            except Exception as cm_e:
-                logger.exception(f'请求过程发生异常', exc_info=cm_e)
-                await event.reply(f'请求过程发生异常: {str(cm_e)}')
-            return
         try:
-            await event.reply(await self.add_comic(hitomi_id))
+            if hitomi_id:
+                await event.reply(await self.add_comic(hitomi_id))
+                return
+            comic_infos = await self.search_comic(hitomi_input)
+            for comic_info in comic_infos:
+                # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
+                await self.api.send_group_text(event.group_id,
+                                               f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
+            await event.reply('搜索结果结束')
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
             await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
