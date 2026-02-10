@@ -144,8 +144,22 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 return f'存在需手动录入的tag, 请前往网页进行添加\n{redirect_url}'
             resp = await client.post('/api/documents/hitomi/add', json={'source_document_id': str(hitomi_id),
                                                                         'inexistent_tags': {}})
+            if resp.status_code != 200:
+                resp.raise_for_status()
             redirect_url = f'{self.cm_config.base_url}/show_status'
             return f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}'
+
+    async def search_comic(self, search_str: str) -> list[dict]:
+        async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                     cookies={'auth_token': self.cm_config.auth_token}) as client:
+            resp = await client.get(f'/api/documents/hitomi/search?search_str={search_str}')
+            if resp.status_code != 200:
+                err_json = resp.json()
+                err_detail = err_json.get('detail', None)
+                if err_detail:
+                    raise RuntimeError(f'错误码 {resp.status_code} 错误详情: {err_detail}')
+                resp.raise_for_status()
+            return resp.json()
 
     @admin_filter
     @filter_registry.filters(GROUP_FILTER_NAME)
@@ -159,24 +173,19 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         except ValueError:
             hitomi_id = extract_hitomi_id(hitomi_input)
         if not hitomi_id:
-            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
-                resp = await client.get(f'/api/documents/hitomi/search?search_str={hitomi_input}')
-                if resp.status_code != 200:
-                    await event.reply(f'请求失败, 错误码: {resp.status_code}')
-                    try:
-                        err_json = resp.json()
-                        err_detail = err_json.get('detail', None)
-                        if err_detail:
-                            await event.reply(f'错误详情: {err_detail}')
-                    except Exception as e:
-                        logger.debug(e, exc_info=True)
-                    return
-                comic_infos: list[dict] = resp.json()
+            try:
+                comic_infos = await self.search_comic(hitomi_input)
                 for comic_info in comic_infos:
                     # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                    await self.api.send_group_text(event.group_id, f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
+                    await self.api.send_group_text(event.group_id,
+                                                   f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
                 await event.reply(event.group_id, '搜索结果结束')
+            except HTTPStatusError as cm_e:
+                logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
+                await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
+            except Exception as cm_e:
+                logger.exception(f'请求过程发生异常', exc_info=cm_e)
+                await event.reply(f'请求过程发生异常: {str(cm_e)}')
             return
         try:
             await event.reply(await self.add_comic(hitomi_id))
