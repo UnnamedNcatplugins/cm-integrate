@@ -1,16 +1,15 @@
-from httpx import HTTPStatusError
-from ncatbot.plugin_system import NcatBotPlugin, command_registry, filter_registry, admin_filter, on_group_at
+import base64
+import re
+import urllib.parse
 from dataclasses import dataclass, field
-from .config_proxy import ProxiedPluginConfig
-from ncatbot.utils import get_log
+import httpx
+import natsort
+from httpx import HTTPStatusError
 from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
 from ncatbot.core.event.message_segment import Reply, Text, PlainText, MessageArray
-from pathlib import Path
-import natsort
-import urllib.parse
-import uuid
-import httpx
-import re
+from ncatbot.plugin_system import NcatBotPlugin, command_registry, filter_registry, admin_filter, on_group_at
+from ncatbot.utils import get_log
+from .config_proxy import ProxiedPluginConfig
 
 PLUGIN_NAME = 'UnnamedCmIntegrate'
 
@@ -171,6 +170,19 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 return await request(func_client)
         return await request(func_client)
 
+    async def get_comic_thumb_base64(self, comic_info: dict, client: httpx.AsyncClient | None = None) -> str | None:
+        comic_urls: dict[str, str] = await self.get_comic_urls(comic_info['id'], client)
+        comic_urls_tuple = natsort.natsorted(comic_urls.items(), key=lambda x: x[0])
+        thumb_url = comic_urls_tuple[0][1]
+        resp = await client.get(thumb_url, headers={
+            'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
+        resp.raise_for_status()
+        if not resp.content:
+            raise RuntimeError('content 为空')
+        # 转为 Base64 字符串
+        b64_data = base64.b64encode(resp.content).decode('utf-8')
+        return f"base64://{b64_data}"
+
     async def search_comic(self, search_str: str, func_client: httpx.AsyncClient | None = None) -> list[dict]:
         async def request(client: httpx.AsyncClient):
             resp = await client.get(f'/api/documents/hitomi/search?search_str={search_str}')
@@ -213,27 +225,12 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                     reply_msg = MessageArray()
                     # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
                     reply_msg.add_text(f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{hitomi_id}\n{comic_info["title"]}')
-                    comic_thumb: Path | None = None
-                    comic_thumb_excep: Exception | None = None
                     try:
-                        comic_urls: dict[str, str] = await self.get_comic_urls(hitomi_id, client)
-                        comic_urls_tuple = natsort.natsorted(comic_urls.items(), key=lambda x: x[0])
-                        thumb_url = comic_urls_tuple[0][1]
-                        thumb_name = Path(comic_urls_tuple[0][0])
-                        resp = await client.get(thumb_url, headers={'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
-                        resp.raise_for_status()
-                        comic_thumb = Path(f'{uuid.uuid4()}.{thumb_name.suffix}')
-                        with open(comic_thumb, 'wb') as thumb_f:
-                            thumb_f.write(resp.content)
+                        comic_thumb = await self.get_comic_thumb_base64(comic_info, client)
+                        reply_msg.add_image(comic_thumb)
                     except Exception as thumb_e:
-                        comic_thumb_excep = thumb_e
-                    if comic_thumb and comic_thumb_excep is None:
-                        reply_msg.add_image(str(comic_thumb))
-                    else:
-                        reply_msg.add_text(f'\n封面获取失败 {type(comic_thumb_excep)}: {comic_thumb_excep}')
+                        reply_msg.add_text(f'\n封面获取失败 {type(thumb_e)}: {thumb_e}')
                     await self.api.post_group_array_msg(event.group_id, reply_msg)
-                    if comic_thumb and comic_thumb.exists():
-                        comic_thumb.unlink()
                 await event.reply('搜索结果结束')
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
@@ -241,9 +238,6 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         except Exception as cm_e:
             logger.exception(f'请求过程发生异常', exc_info=cm_e)
             await event.reply(f'请求过程发生异常: {str(cm_e)}')
-        finally:
-            if comic_thumb and comic_thumb.exists():
-                comic_thumb.unlink()
 
     async def on_close(self) -> None:
         await super().on_close()
