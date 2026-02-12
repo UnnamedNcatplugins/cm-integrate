@@ -115,6 +115,9 @@ class UnnamedCmIntegrate(NcatBotPlugin):
     @filter_registry.filters(GROUP_FILTER_NAME)
     @on_group_at
     async def at_dispatch(self, event: GroupMessageEvent):
+        if not self.init:
+            await event.reply(f'神选集成未激活, 具体原因看log')
+            return
         try:
             hitomi_id = await self.add_comic_verify(event)
             if hitomi_id:
@@ -224,13 +227,17 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                     hitomi_id: int = comic_info["id"]
                     reply_msg = MessageArray()
                     # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                    reply_msg.add_text(f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{hitomi_id}\n{comic_info["title"]}')
+                    text_content = f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{hitomi_id}\n{comic_info["title"]}'
+                    reply_msg.add_text(text_content)
                     try:
                         comic_thumb = await self.get_comic_thumb_base64(comic_info, client)
                         reply_msg.add_image(comic_thumb)
                     except Exception as thumb_e:
                         reply_msg.add_text(f'\n封面获取失败 {type(thumb_e)}: {thumb_e}')
-                    await self.api.post_group_array_msg(event.group_id, reply_msg)
+                    try:
+                        await self.api.post_group_array_msg(event.group_id, reply_msg)
+                    except Exception as send_e:
+                        await self.api.send_group_text(event.group_id, text_content + f'\n发送失败 {type(send_e)}: {send_e}')
                 await event.reply('搜索结果结束')
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
