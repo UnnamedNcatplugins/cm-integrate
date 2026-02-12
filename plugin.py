@@ -9,6 +9,8 @@ from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
 from ncatbot.core.event.message_segment import Reply, Text, PlainText, MessageArray
 from ncatbot.plugin_system import NcatBotPlugin, command_registry, filter_registry, admin_filter, on_group_at
 from ncatbot.utils import get_log
+from sqlalchemy.orm import join
+
 from .config_proxy import ProxiedPluginConfig
 
 PLUGIN_NAME = 'UnnamedCmIntegrate'
@@ -173,12 +175,18 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 return await request(func_client)
         return await request(func_client)
 
-    async def get_comic_thumb_base64(self, comic_info: dict, client: httpx.AsyncClient | None = None) -> str | None:
-        comic_urls: dict[str, str] = await self.get_comic_urls(comic_info['id'], client)
+    async def get_comic_thumb_base64(self, comic_info: dict, client: httpx.AsyncClient | None = None) -> str:
+        comic_urls = await self.get_comic_urls(comic_info['id'], client)
         comic_urls_tuple = natsort.natsorted(comic_urls.items(), key=lambda x: x[0])
         thumb_url = comic_urls_tuple[0][1]
-        resp = await client.get(thumb_url, headers={
-            'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
+        if client is None:
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
+                resp = await client.get(thumb_url, headers={
+                    'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
+        else:
+            resp = await client.get(thumb_url, headers={
+                'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
         resp.raise_for_status()
         if not resp.content:
             raise RuntimeError('content 为空')
@@ -224,10 +232,12 @@ class UnnamedCmIntegrate(NcatBotPlugin):
 
                 comic_infos = await self.search_comic(hitomi_input, client)
                 for comic_info in comic_infos:
-                    hitomi_id: int = comic_info["id"]
                     reply_msg = MessageArray()
-                    # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                    text_content = f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{hitomi_id}\n{comic_info["title"]}'
+                    text_parodys = ', '.join([parody.get('parody', 'None') for parody in comic_info.get('parodys', [])])
+                    text_characters = ', '.join([character.get('character', 'None') for character in comic_info.get('characters', [])])
+                    text_tags = ', '.join([tag.get('tag', 'None') for tag in comic_info.get('tags', [])])
+                    # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearchResult 取sha256
+                    text_content = f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}\n角色:{text_characters}\n世界观:{text_parodys}\nTag:{text_tags}'
                     reply_msg.add_text(text_content)
                     try:
                         comic_thumb = await self.get_comic_thumb_base64(comic_info, client)
