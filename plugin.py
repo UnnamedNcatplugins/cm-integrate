@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 from .config_proxy import ProxiedPluginConfig
 from ncatbot.utils import get_log
 from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
-from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText
+from ncatbot.core.event.message_segment import Reply, Text, PlainText, MessageArray
+from pathlib import Path
+import natsort
+import urllib.parse
+import uuid
 import httpx
 import re
 
@@ -77,34 +81,23 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         else:
             await super().on_close()
 
-    @admin_filter
-    @filter_registry.filters(GROUP_FILTER_NAME)
-    @on_group_at
-    async def at_dispatch(self, event: GroupMessageEvent):
+    async def add_comic_verify(self, event: GroupMessageEvent) -> int:
         logger.debug('收到at消息, 开始验证')
         if len(event.message) != 3:
             logger.debug(f'at消息长度不为3, 已取消')
-            return
-        origin_text = None
+            return 0
         cmd_trigger = False
+        origin_text: str | None = None
         for message_segment in event.message:
             if message_segment.msg_seg_type == 'reply':
                 assert isinstance(message_segment, Reply)
                 reply_ptr = message_segment.id
                 origin_msg = await self.api.get_msg(reply_ptr)
-                if len(origin_msg.message) > 1:
-                    logger.debug(f'引用消息长度超1, 退出')
-                    return
-                origin_text_msg = origin_msg.message.messages[0]
-                if origin_text_msg.msg_seg_type != 'text':
-                    logger.debug(f'引用消息类型非纯文字')
-                    return
-                assert isinstance(origin_text_msg, Text) or isinstance(origin_text_msg, PlainText)
-                origin_text = origin_text_msg.text
+                origin_text = origin_msg.raw_message
                 # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearchResult 取sha256
                 if not origin_text.startswith('26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e'):
                     logger.debug(f'开头魔数不匹配, 退出')
-                    return
+                    return 0
             if message_segment.msg_seg_type == 'text':
                 assert isinstance(message_segment, Text) or isinstance(message_segment, PlainText)
                 if message_segment.text.replace(' ', '') == 's':
@@ -112,14 +105,21 @@ class UnnamedCmIntegrate(NcatBotPlugin):
 
         if not cmd_trigger:
             logger.debug(f'没有触发命令')
-            return
+            return 0
         if not origin_text:
             logger.debug(f'没有提取文本')
-            return
+            return 0
         search_result = origin_text.splitlines()
-        hitomi_id = int(search_result[1])
+        return int(search_result[1])
+
+    @admin_filter
+    @filter_registry.filters(GROUP_FILTER_NAME)
+    @on_group_at
+    async def at_dispatch(self, event: GroupMessageEvent):
         try:
-            await event.reply(await self.add_comic(hitomi_id))
+            hitomi_id = await self.add_comic_verify(event)
+            if hitomi_id:
+                await event.reply(await self.add_comic(hitomi_id))
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
             await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
@@ -154,7 +154,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 return await request(func_client)
         return await request(func_client)
 
-    async def get_comic_urls(self, hitomi_id: int, func_client: httpx.AsyncClient | None = None):
+    async def get_comic_urls(self, hitomi_id: int, func_client: httpx.AsyncClient | None = None) -> dict[str, str]:
         async def request(client: httpx.AsyncClient):
             resp = await client.get(f'/api/site/hitomi/download_urls?hitomi_id={hitomi_id}')
             if resp.status_code != 200:
@@ -198,18 +198,42 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         try:
             hitomi_id = int(hitomi_input)
         except ValueError:
-            hitomi_id = extract_hitomi_id(hitomi_input)
+            hitomi_id = int(extract_hitomi_id(hitomi_input)) if extract_hitomi_id(hitomi_input) else None
+
         try:
             async with httpx.AsyncClient(base_url=self.cm_config.base_url,
                                          cookies={'auth_token': self.cm_config.auth_token}) as client:
                 if hitomi_id:
                     await event.reply(await self.add_comic(hitomi_id, client))
                     return
+
                 comic_infos = await self.search_comic(hitomi_input, client)
                 for comic_info in comic_infos:
+                    hitomi_id: int = comic_info["id"]
+                    reply_msg = MessageArray()
                     # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                    await self.api.send_group_text(event.group_id,
-                                                   f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
+                    reply_msg.add_text(f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{hitomi_id}\n{comic_info["title"]}')
+                    comic_thumb: Path | None = None
+                    comic_thumb_excep: Exception | None = None
+                    try:
+                        comic_urls: dict[str, str] = await self.get_comic_urls(hitomi_id, client)
+                        comic_urls_tuple = natsort.natsorted(comic_urls.items(), key=lambda x: x[0])
+                        thumb_url = comic_urls_tuple[0][1]
+                        thumb_name = Path(comic_urls_tuple[0][0])
+                        resp = await client.get(thumb_url, headers={'referer': 'https://hitomi.la' + urllib.parse.quote(comic_info["galleryurl"])})
+                        resp.raise_for_status()
+                        comic_thumb = Path(f'{uuid.uuid4()}.{thumb_name.suffix}')
+                        with open(comic_thumb, 'wb') as thumb_f:
+                            thumb_f.write(resp.content)
+                    except Exception as thumb_e:
+                        comic_thumb_excep = thumb_e
+                    if comic_thumb and comic_thumb_excep is None:
+                        reply_msg.add_image(str(comic_thumb))
+                    else:
+                        reply_msg.add_text(f'\n封面获取失败 {type(comic_thumb_excep)}: {comic_thumb_excep}')
+                    await self.api.post_group_array_msg(event.group_id, reply_msg)
+                    if comic_thumb and comic_thumb.exists():
+                        comic_thumb.unlink()
                 await event.reply('搜索结果结束')
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
@@ -217,6 +241,9 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         except Exception as cm_e:
             logger.exception(f'请求过程发生异常', exc_info=cm_e)
             await event.reply(f'请求过程发生异常: {str(cm_e)}')
+        finally:
+            if comic_thumb and comic_thumb.exists():
+                comic_thumb.unlink()
 
     async def on_close(self) -> None:
         await super().on_close()
