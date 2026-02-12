@@ -4,9 +4,8 @@ from dataclasses import dataclass, field
 from .config_proxy import ProxiedPluginConfig
 from ncatbot.utils import get_log
 from ncatbot.core.event import GroupMessageEvent, BaseMessageEvent
-from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText, At
+from ncatbot.core.event.message_segment.message_segment import Reply, Text, PlainText
 import httpx
-from typing import Optional
 import re
 
 PLUGIN_NAME = 'UnnamedCmIntegrate'
@@ -35,7 +34,7 @@ class CmConfig(ProxiedPluginConfig):
     filter_group: list[int] = field(default_factory=list)
 
 
-def extract_hitomi_id(hitomi_url: str) -> Optional[str]:
+def extract_hitomi_id(hitomi_url: str) -> str | None:
     __match = re.search(r'(\d+)\.html$', hitomi_url)
     if __match:
         return __match.group(1)
@@ -49,7 +48,7 @@ class UnnamedCmIntegrate(NcatBotPlugin):
     description = "集成色孽神选"  # 可选
     author = "default_user"  # 可选
 
-    cm_config: Optional[CmConfig] = None
+    cm_config: CmConfig | None = None
     init = False
 
     async def on_load(self) -> None:
@@ -65,22 +64,23 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                                      cookies={'auth_token': self.cm_config.auth_token}) as client:
             try:
                 resp = await client.get('/api/site/download_status')
-                if resp.status_code == 200:
-                    link_ok = True
-                else:
-                    logger.error(f'测试链接返回{resp.status_code}')
+                resp.raise_for_status()
+                link_ok = True
             except Exception as e:
                 logger.exception(f'请求失败', exc_info=e)
         if not link_ok:
             logger.error(f'连通性测试失败, 将禁用神选集成')
             return
-        self.init = True
-        await super().on_load()
+        self.init = link_ok
+        if self.init:
+            await super().on_load()
+        else:
+            await super().on_close()
 
     @admin_filter
     @filter_registry.filters(GROUP_FILTER_NAME)
     @on_group_at
-    async def at_func(self, event: GroupMessageEvent):
+    async def at_dispatch(self, event: GroupMessageEvent):
         logger.debug('收到at消息, 开始验证')
         if len(event.message) != 3:
             logger.debug(f'at消息长度不为3, 已取消')
@@ -127,9 +127,8 @@ class UnnamedCmIntegrate(NcatBotPlugin):
             logger.exception(f'请求过程发生异常', exc_info=cm_e)
             await event.reply(f'请求过程发生异常: {str(cm_e)}')
 
-    async def add_comic(self, hitomi_id: int):
-        async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                     cookies={'auth_token': self.cm_config.auth_token}) as client:
+    async def add_comic(self, hitomi_id: int, func_client: httpx.AsyncClient | None = None):
+        async def request(client: httpx.AsyncClient):
             resp = await client.get(f'/api/documents/hitomi/get/{hitomi_id}')
             if resp.status_code == 200:
                 comic_info: dict = resp.json()
@@ -149,9 +148,31 @@ class UnnamedCmIntegrate(NcatBotPlugin):
             redirect_url = f'{self.cm_config.base_url}/show_status'
             return f'tag已完备, 已提交录入任务, 访问网页以查看进度\n{redirect_url}'
 
-    async def search_comic(self, search_str: str) -> list[dict]:
-        async with httpx.AsyncClient(base_url=self.cm_config.base_url,
-                                     cookies={'auth_token': self.cm_config.auth_token}) as client:
+        if func_client is None:
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as func_client:
+                return await request(func_client)
+        return await request(func_client)
+
+    async def get_comic_urls(self, hitomi_id: int, func_client: httpx.AsyncClient | None = None):
+        async def request(client: httpx.AsyncClient):
+            resp = await client.get(f'/api/site/hitomi/download_urls?hitomi_id={hitomi_id}')
+            if resp.status_code != 200:
+                err_json = resp.json()
+                err_detail = err_json.get('detail', None)
+                if err_detail:
+                    raise RuntimeError(f'错误码 {resp.status_code} 错误详情: {err_detail}')
+                resp.raise_for_status()
+            return resp.json()
+
+        if func_client is None:
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as func_client:
+                return await request(func_client)
+        return await request(func_client)
+
+    async def search_comic(self, search_str: str, func_client: httpx.AsyncClient | None = None) -> list[dict]:
+        async def request(client: httpx.AsyncClient):
             resp = await client.get(f'/api/documents/hitomi/search?search_str={search_str}')
             if resp.status_code != 200:
                 err_json = resp.json()
@@ -161,10 +182,16 @@ class UnnamedCmIntegrate(NcatBotPlugin):
                 resp.raise_for_status()
             return resp.json()
 
+        if func_client is None:
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as func_client:
+                return await request(func_client)
+        return await request(func_client)
+
     @admin_filter
     @filter_registry.filters(GROUP_FILTER_NAME)
     @command_registry.command('cm')
-    async def log_comic(self, event: GroupMessageEvent, hitomi_input: str):
+    async def cm_cmd(self, event: GroupMessageEvent, hitomi_input: str):
         if not self.init:
             await event.reply(f'神选集成未激活, 具体原因看log')
             return
@@ -173,15 +200,17 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         except ValueError:
             hitomi_id = extract_hitomi_id(hitomi_input)
         try:
-            if hitomi_id:
-                await event.reply(await self.add_comic(hitomi_id))
-                return
-            comic_infos = await self.search_comic(hitomi_input)
-            for comic_info in comic_infos:
-                # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
-                await self.api.send_group_text(event.group_id,
-                                               f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
-            await event.reply('搜索结果结束')
+            async with httpx.AsyncClient(base_url=self.cm_config.base_url,
+                                         cookies={'auth_token': self.cm_config.auth_token}) as client:
+                if hitomi_id:
+                    await event.reply(await self.add_comic(hitomi_id, client))
+                    return
+                comic_infos = await self.search_comic(hitomi_input, client)
+                for comic_info in comic_infos:
+                    # 源自 HayaseYuuka.UnnamedCmIntegrate.HitomiComicSearcgResult 取sha256
+                    await self.api.send_group_text(event.group_id,
+                                                   f'26a85b4651da987106c8bc0f4aa91de966104ae5ed14be4000132ac26002b74e\n{comic_info["id"]}\n{comic_info["title"]}')
+                await event.reply('搜索结果结束')
         except HTTPStatusError as cm_e:
             logger.exception(f'请求过程发生HTTP异常', exc_info=cm_e)
             await event.reply(f'请求过程发生HTTP异常: {str(cm_e)}')
@@ -193,4 +222,4 @@ class UnnamedCmIntegrate(NcatBotPlugin):
         await super().on_close()
 
 
-global_plugin_instance: Optional[UnnamedCmIntegrate] = None
+global_plugin_instance: UnnamedCmIntegrate | None = None
